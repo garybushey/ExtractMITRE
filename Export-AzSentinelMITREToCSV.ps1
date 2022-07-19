@@ -12,17 +12,28 @@
         Enter the Log Analytics workspace name, this is a required parameter
     .PARAMETER FileName
         Enter the file name to use.  Defaults to "ruletemplates"  ".csv" will be appended to all filenames
-    .PARAMETER IncludeDispabled
+    .PARAMETER IncludeDisabled
         Include disabled rules in the count.  Defaults to false
+    .PARAMETER ShowZeroSimulatedRuleTemplates
+        Include those rule templates that would cover any techniques not already covered (count == 0).  Defaults to false
     .NOTES
         AUTHOR= Gary Bushey
-        LASTEDIT= 6 July 2022D
+        LASTEDIT= 17 July 2022
     .EXAMPLE
         Export-AzSentineMITREtoCSV -WorkspaceName "workspacename" -ResourceGroupName "rgname"
         In this example you will get the file named "mitrerules.csv" generated containing all the rule's MITRE information
     .EXAMPLE
         Export-AzSentineMITREtoCSV -WorkspaceName "workspacename" -ResourceGroupName "rgname" -fileName "test"
         In this example you will get the file named "test.csv" generated containing all the rule's MITRE information
+     .EXAMPLE
+        Export-AzSentineMITREtoCSV -WorkspaceName "workspacename" -ResourceGroupName "rgname" -IncludeDisabled $true
+        In this example you will get the file named "mitrerules.csv" generated containing all the rule's MITRE information, including those rules that are disabled
+      .EXAMPLE
+        Export-AzSentineMITREtoCSV -WorkspaceName "workspacename" -ResourceGroupName "rgname" -fileName "simulated" -ShowZeroSimulatedRuleTemplates $true
+        In this example you will get the file named "simulated.csv" generated containing those rule templates that will cover techniques whose count == 0
+      .EXAMPLE
+        Export-AzSentineMITREtoCSV -WorkspaceName "workspacename" -ResourceGroupName "rgname" -fileName "simulated" -ShowAllSimulatedRuleTemplates $true
+        In this example you will get the file named "simulated.csv" generated containing those rule templates that will cover techniques and have not been used yet.
 #>
 
 
@@ -36,7 +47,12 @@ param (
 
   [string]$FileName = "mitrerules.csv",
 
-  [bool]$IncludeDisabled = $false
+  [bool]$IncludeDisabled = $false,
+
+  [bool]$ShowZeroSimulatedRuleTemplates = $false,
+
+  [bool]$ShowAllSimulatedRuleTemplates = $false
+  
 )
 
 Add-Type -AssemblyName System.Collections
@@ -47,6 +63,13 @@ $outputObject = New-Object system.Data.DataTable
 [void]$outputObject.Columns.Add('Name', [string]::empty.GetType() )
 [void]$outputObject.Columns.Add('Count', [string]::empty.GetType() )
 [void]$outputObject.Columns.Add('Description', [string]::empty.GetType() )
+
+$simulatedOutput = New-Object System.Data.DataTable
+[void]$simulatedOutput.Columns.Add('Tactic', [string]::empty.GetType() )
+[void]$simulatedOutput.Columns.Add('Technique', [string]::empty.GetType() )
+[void]$simulatedOutput.Columns.Add('Name', [string]::empty.GetType() )
+[void]$simulatedOutput.Columns.Add('RuleName', [string]::empty.GetType() ) 
+
 
 #[collections.generic.list[object]]$outputObject = @("Tactic" , "Technique" , "Name" , "Count" ,"Description" )
 
@@ -603,7 +626,7 @@ $techniqueDescriptionHash = @{
   T0873 = "Adversaries may attempt to infect project files with malicious code. These project files may consist of objects, program organization units, variables such as tags, documentation, and other configurations needed for PLC programs to function.1 Using built in functions of the engineering software, adversaries may be able to download an infected program to a PLC in the operating environment enabling further execution and persistence techniques."
   T0890 = "Adversaries may exploit software vulnerabilities in an attempt to elevate privileges. Exploitation of a software vulnerability occurs when an adversary takes advantage of a programming error in a program, service, or within the operating system software or kernel itself to execute adversary-controlled code. Security constructs such as permission levels will often hinder access to information and use of certain techniques, so adversaries will likely need to perform privilege escalation to include use of software exploitation to circumvent those restrictions."
 } 
-Function Export-AzSentineMITREtoCSV ($workspaceName, $resourceGroupName, $filename) {
+Function Export-AzSentineMITREtoCSV ($workspaceName, $resourceGroupName, $filename, $includeDisabled, $ShowZeroSimulatedRuleTemplates, $ShowAllSimulatedRuleTemplates) {
 
   #Setup the Authentication header needed for the REST calls
   $context = Get-AzContext
@@ -624,7 +647,8 @@ Function Export-AzSentineMITREtoCSV ($workspaceName, $resourceGroupName, $filena
   foreach ($tactic in $tacticHash.keys) {
     foreach ($technique in $tacticHash[$tactic]) {
       $count = 0
-      if ($IncludeDisabled) {
+      #Do we want to include disabled rules?  If so, then no need to check if the rule is disabled or not.
+      if ($includeDisabled) {
         $count = ($results.properties | Where-Object { ($_.techniques -eq $technique) -and ($_.tactics -eq $tactic) }).count
       }
       else {
@@ -636,13 +660,57 @@ Function Export-AzSentineMITREtoCSV ($workspaceName, $resourceGroupName, $filena
       $newRow.Tactic = $tactic
       $newRow.Technique = $technique
       $newRow.Name = $techniqueNameHash[$technique]
-      $newRow.Count=$count
+      $newRow.Count = $count
       $newRow.Description = $techniqueDescriptionHash[$technique]
 
       [void]$outputObject.Rows.Add( $newRow )
     }
   }
-  $outputObject |  Export-Csv -QuoteFields "Description" -Path $filename
+  if ($ShowZeroSimulatedRuleTemplates) {
+    Export-ZeroCoveredSimulatedRuleTemplates $authHeader $subscriptionId $resourceGroupName $workspaceName $filename $outputObject
+  }
+  elseif ($ShowAllSimulatedRuleTemplates) {
+    Export-AllCoveredSimulatedRuleTemplates $authHeader $subscriptionId $resourceGroupName $workspaceName $filename $outputObject
+  }
+  else {
+    $outputObject |  Export-Csv -QuoteFields "Description" -Path $filename
+  }
+}
+
+Function Export-ZeroCoveredSimulatedRuleTemplates ($authHeader, $subscriptionId, $resourceGroupName, $workspaceName, $filename, $tacticCountObject ) {
+  $url = "https://management.azure.com/subscriptions/$($subscriptionId)/resourceGroups/$($resourceGroupName)/providers/Microsoft.OperationalInsights/workspaces/$($workspaceName)/providers/Microsoft.SecurityInsights/alertruletemplates?api-version=2021-10-01-preview"
+  $ruleTemplateResults = (Invoke-RestMethod -Method "Get" -Uri $url -Headers $authHeader ).value
+  foreach ($tacticRow in ($tacticCountObject | Where-Object { $_.count -eq 0 })) {
+    foreach ($ruleTemplate in ($ruleTemplateResults | Where-Object { ($_.properties.techniques -eq $tacticRow.technique) -and ($_.properties.tactics -eq $tacticRow.tactic) }) ) {
+      $newRow = $simulatedOutput.NewRow()
+      $newRow.Tactic = $tacticRow.tactic
+      $newRow.Technique = $tacticRow.technique
+      $newRow.Name = $tacticRow.Name
+      $newRow.RuleName = $ruleTemplate.properties.displayName
+
+      [void]$simulatedOutput.Rows.Add( $newRow )
+    }
+  }
+  $simulatedOutput |  Export-Csv -QuoteFields "RuleName" -Path $filename
+}
+
+
+Function Export-AllCoveredSimulatedRuleTemplates ($authHeader, $subscriptionId, $resourceGroupName, $workspaceName, $filename, $tacticCountObject ) {
+  $url = "https://management.azure.com/subscriptions/$($subscriptionId)/resourceGroups/$($resourceGroupName)/providers/Microsoft.OperationalInsights/workspaces/$($workspaceName)/providers/Microsoft.SecurityInsights/alertruletemplates?api-version=2021-10-01-preview"
+  $ruleTemplateResults = (Invoke-RestMethod -Method "Get" -Uri $url -Headers $authHeader ).value
+  foreach ($tacticRow in ($tacticCountObject )) {
+    #We only want those rule templates that have not been used, hence the check against alertRulesCreatedByTemplateCount
+    foreach ($ruleTemplate in ($ruleTemplateResults | Where-Object { ($_.properties.techniques -eq $tacticRow.technique) -and ($_.properties.tactics -eq $tacticRow.tactic) -and ($_.properties.alertRulesCreatedByTemplateCount -eq 0) }) ) {
+      $newRow = $simulatedOutput.NewRow()
+      $newRow.Tactic = $tacticRow.tactic
+      $newRow.Technique = $tacticRow.technique
+      $newRow.Name = $tacticRow.Name
+      $newRow.RuleName = $ruleTemplate.properties.displayName
+
+      [void]$simulatedOutput.Rows.Add( $newRow )
+    }
+  }
+  $simulatedOutput |  Export-Csv -QuoteFields "RuleName" -Path $filename
 }
 
 
@@ -650,4 +718,4 @@ Function Export-AzSentineMITREtoCSV ($workspaceName, $resourceGroupName, $filena
 if (! $Filename.EndsWith(".csv")) {
   $FileName += ".csv"
 }
-Export-AzSentineMITREtoCSV $WorkSpaceName $ResourceGroupName $FileName 
+Export-AzSentineMITREtoCSV $WorkSpaceName $ResourceGroupName $FileName $IncludeDisabled $ShowZeroSimulatedRuleTemplates $ShowAllSimulatedRuleTemplates
