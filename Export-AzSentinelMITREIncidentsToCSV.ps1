@@ -24,31 +24,21 @@ MITRE tactics and techniques being used or a list of the rules using the tactics
     .PARAMETER ShowRules
 
         Include a listing of all the rules for each tactic/technique.  Defaults to false
+    .PARAMETER ShowIncidents
 
+        Include a listing of all the incidents for each tactic/technique.  Defaults to false
     .NOTES
 
         AUTHOR= Gary Bushey
         LASTEDIT= 30 Sept 2022
     .EXAMPLE
 
-        Export-AzSentineMITREToCSV -WorkspaceName "WorkspaceName" -ResourceGroupName "rgname"
+        Export-AzSentineMITREIncidentsToCSV -WorkspaceName "WorkspaceName" -ResourceGroupName "rgname"
         In this example you will get the file named "mitrerules.csv" generated containing the count of the active rule's MITRE information
     .EXAMPLE
 
-        Export-AzSentineMITREToCSV -WorkspaceName "WorkspaceName" -ResourceGroupName "rgname" -FileName "test"
+        Export-AzSentineMITREIncidentsToCSV -WorkspaceName "WorkspaceName" -ResourceGroupName "rgname" -FileName "test"
         In this example you will get the file named "test.csv" generated containing  the count of the active rule's MITRE information
-    .EXAMPLE
-
-        Export-AzSentineMITREToCSV -WorkspaceName "WorkspaceName" -ResourceGroupName "rgname" -IncludedDisabled $true
-        In this example you will get the file named "mitrules.csv" generated containing the count of all the rule's MITRE information
-    .EXAMPLE
-
-        Export-AzSentineMITREToCSV -WorkspaceName "WorkspaceName" -ResourceGroupName "rgname" -ShowRules $true
-        In this example you will get the file named "mitrerules.csv" generated containing all the active rule's MITRE information
-    .EXAMPLE
-    
-        Export-AzSentineMITREToCSV -WorkspaceName "WorkspaceName" -ResourceGroupName "rgname" -ShowRules $true -IncludeDisabled $true
-        In this example you will get the file named "mitrerules.csv" generated containing all the rule's MITRE information
 #>
 
 [CmdletBinding()]
@@ -60,11 +50,7 @@ param (
   [Parameter(Mandatory = $true)]
   [string]$ResourceGroupName,
 
-  [string]$FileName = "mitrerules.csv",
-
-  [bool]$IncludeDisabled = $false,
-
-  [bool]$ShowRules = $false
+  [string]$FileName = "mitreincidents.csv"
 )
 
 Add-Type -AssemblyName System.Collections
@@ -73,10 +59,10 @@ $outputObject = New-Object system.Data.DataTable
 [void]$outputObject.Columns.Add('Tactic', [string]::empty.GetType() )
 [void]$outputObject.Columns.Add('Technique', [string]::empty.GetType() )
 [void]$outputObject.Columns.Add('Name', [string]::empty.GetType() )
-[void]$outputObject.Columns.Add('Count', [string]::empty.GetType() )
 [void]$outputObject.Columns.Add('Description', [string]::empty.GetType() )
-[void]$outputObject.Columns.Add('RuleName', [string]::empty.GetType() )
-[void]$outputObject.Columns.Add('IsRuleEnabled', [string]::empty.GetType() )
+[void]$outputObject.Columns.Add('IncidentName', [string]::empty.GetType() )
+[void]$outputObject.Columns.Add('IncidentNumber', [string]::empty.GetType() )
+[void]$outputObject.Columns.Add('Status', [string]::empty.GetType() )
 
 $tacticHash = [ordered]@{
   "Reconnaissance"          = @("T1595", "T1592", "T1589", "T1590", "T1591", "T1598", "T1597", "T1596", "T1593", "T1594")
@@ -630,7 +616,7 @@ $techniqueDescriptionHash = @{
   T0873 = "Adversaries may attempt to infect project files with malicious code. These project files may consist of objects, program organization units, variables such as tags, documentation, and other configurations needed for PLC programs to function.1 Using built in functions of the engineering software, adversaries may be able to download an infected program to a PLC in the operating environment enabling further execution and persistence techniques."
   T0890 = "Adversaries may exploit software vulnerabilities in an attempt to elevate privileges. Exploitation of a software vulnerability occurs when an adversary takes advantage of a programming error in a program, service, or within the operating system software or kernel itself to execute adversary-controlled code. Security constructs such as permission levels will often hinder access to information and use of certain techniques, so adversaries will likely need to perform privilege escalation to include use of software exploitation to circumvent those restrictions."
 } 
-Function Export-AzSentineMITREToCSV ($WorkspaceName, $ResourceGroupName, $FileName, $IncludeDisabled, $ShowRules, $ShowIncidents) {
+Function Export-AzSentineMITREIncidentsToCSV ($WorkspaceName, $ResourceGroupName, $FileName, $IncludeDisabled, $ShowRules, $ShowIncidents) {
 
 
   if (! $FileName.EndsWith(".csv")) {
@@ -648,81 +634,137 @@ Function Export-AzSentineMITREToCSV ($WorkspaceName, $ResourceGroupName, $FileNa
     
   $subscriptionId = (Get-AzContext).Subscription.Id
   $url = "https://management.azure.com/subscriptions/$($subscriptionId)/resourceGroups/$($ResourceGroupName)/providers/Microsoft.OperationalInsights/workspaces/$($WorkspaceName)/providers/Microsoft.SecurityInsights/"
-  $url = $url + "alertrules?api-version=2021-10-01-preview"
+  $returnDate = GetDateGUI
+  $url += "incidents?api-version=2021-10-01-preview&%24filter=properties%2FcreatedTimeUtc%20gt%20" + $returnDate
+
+  $call = (Invoke-RestMethod -Method "Get" -Uri $url -Headers $authHeader )
+  $results = $call.value
+  $nextLink = $call.nextLink
+
+  do {
+    foreach ($tactic in $tacticHash.keys) {
+      foreach ($technique in $tacticHash[$tactic]) {
+        foreach ($result in ($results.properties | Where-Object { ($_.additionalData.techniques -eq $technique) -and ($_.additionalData.tactics -eq $tactic) })) {
+          $newRow = $outputObject.NewRow()
+          $newRow.Tactic = $tactic
+          $newRow.Technique = $technique
+          $newRow.Name = $techniqueNameHash[$technique]
+          $newRow.Description = $techniqueDescriptionHash[$technique]
+          $newRow.IncidentName = $result.title
+          $newRow.IncidentNumber = $result.incidentNumber
+          $newRow.Status = $result.status
+    
+          [void]$outputObject.Rows.Add( $newRow )
+        }
+      }
+    }  
+    $outputObject |  Export-Csv -QuoteFields "Description", "RuleName", "IncidentName" -Path $FileName -Append
+    $outputObject.Clear()
+    $call = (Invoke-RestMethod -Method "Get" -Uri $nextLink -Headers $authHeader )
+    $results = $call.value
+    $nextLink = $call.nextLink
+  }
+  until ($null -eq $nextLink)
+}
+
+function GetDateGUI {
+  Add-Type -AssemblyName System.Windows.Forms
+  # Main Form
+  $mainForm = New-Object System.Windows.Forms.Form
+  $font = New-Object System.Drawing.Font("Consolas", 13)
+  $mainForm.Text = "Time Range"
+  $mainForm.Font = $font
+  $mainForm.Width = 500
+  $mainForm.Height = 300
+
+  $groupBox1 = New-Object System.Windows.Forms.GroupBox
+  $radioButtonLast24 = New-Object System.Windows.Forms.RadioButton
+  $radioButtonLast48 = New-Object System.Windows.Forms.RadioButton
+  $radioButtonLast3Days = New-Object System.Windows.Forms.RadioButton
+  $radioButtonLast7Days = New-Object System.Windows.Forms.RadioButton
+  $radioButtonCustomTime = New-Object System.Windows.Forms.RadioButton
+  $datePicker = New-Object System.Windows.Forms.DateTimePicker
+
+  #Set up the group box to contain all the radio buttons
+  $groupBox1.Controls.Add($datePicker)
+  $groupBox1.Controls.Add($radioButtonCustomTime)
+  $groupBox1.Controls.Add($radioButtonLast7Days)
+  $groupBox1.Controls.Add($radioButtonLast3Days)
+  $groupBox1.Controls.Add($radioButtonLast48)
+  $groupBox1.Controls.Add($radioButtonLast24)
+  $groupBox1.Controls.Add($getSelectedRB)
+  $groupBox1.Location = "30, 20"
+  $groupBox1.Width = 400
+  $groupBox1.Height = 200
+  $groupBox1.Text = "Time Range"
+
+  $radioButtonLast24.Location = "31, 20"
+  $radioButtonLast24.Name = "Last 24 Hours"
+  $radioButtonLast24.Height = 17
+  $radioButtonLast24.Width = 200
+  $radioButtonLast24.Text = "Last 24 hours"
+  $radioButtonLast24.Checked = $true
+
+  $radioButtonLast48.Location = "31, 53"
+  $radioButtonLast48.Height = 17
+  $radioButtonLast48.Width = 200
+  $radioButtonLast48.Text = "Last 48 hours"
+
+  $radioButtonLast3Days.Location = "31, 86"
+  $radioButtonLast3Days.Height = 17
+  $radioButtonLast3Days.Width = 200
+  $radioButtonLast3Days.Text = "Last 3 days"
+
+  $radioButtonLast7Days.Location = "31, 119"
+  $radioButtonLast7Days.Height = 17
+  $radioButtonLast7Days.Width = 200
+  $radioButtonLast7Days.Text = "Last 7 days"
+
+  $radioButtonCustomTime.Location = "31, 152"
+  $radioButtonCustomTime.Height = 17
+  $radioButtonCustomTime.Width = 200
+  $radioButtonCustomTime.Text = "Custom"
+
+  $datePicker.Location = "130,152"
+  $datePicker.Width = "150"
+  $datePicker.Format = [windows.forms.datetimepickerFormat]::custom
+  $datePicker.CustomFormat = "MM/dd/yyyy"
+  $datePicker.MinDate = (Get-Date).AddDays(-90)
+  $datePicker.MaxDate = (Get-Date)
+
+  $mainForm.Controls.add($groupBox1)
+
+  # OK Button
+  $okButton = New-Object System.Windows.Forms.Button
+  $okButton.Location = "15, 230"
+  $okButton.ForeColor = "Black"
+  $okButton.BackColor = "White"
+  $okButton.Text = "OK"
+  $okButton.add_Click({ $mainForm.close() })
+  $mainForm.Controls.Add($okButton)
+
+  [void] $mainForm.ShowDialog()
+  $ReturnDate = ""
+
+  if ($radioButtonLast24.Checked) {
+    $ReturnDate = (Get-Date).AddHours(-24).ToUniversalTime() 
+  }
+  if ($radioButtonLast48.Checked) {
+    $ReturnDate = (Get-Date).AddHours(-48).ToUniversalTime()
+  }
+  if ($radioButtonLast3Days.Checked) {
+    $ReturnDate = (Get-Date).AddDays(-3).ToUniversalTime()
+  }
+  if ($radioButtonLast7Days.Checked) {
+    $ReturnDate = (Get-Date).AddDays(-7).ToUniversalTime()
+  }
+  if ($radioButtonCustomTime.Checked) {
+    $ReturnDate = (Get-Date -Date $datePicker.Value).Date
+  }
+  return Get-Date -Date $ReturnDate -UFormat "%Y-%m-%dT%TZ"
   
-
-  $results = (Invoke-RestMethod -Method "Get" -Uri $url -Headers $authHeader ).value
-
-  foreach ($tactic in $tacticHash.keys) {
-    foreach ($technique in $tacticHash[$tactic]) {
-      $count = 0
-      
-      #Do we want to show the actual rule names that use the technique?
-      if ($ShowRules) {
-        #Do we want to show those rules that are disabled?
-        if ($IncludeDisabled) {
-          foreach ($result in ($results.properties | Where-Object { ($_.techniques -eq $technique) -and ($_.tactics -eq $tactic) })) {
-            $newRow = $outputObject.NewRow()
-            $newRow.Tactic = $tactic
-            $newRow.Technique = $technique
-            $newRow.Name = $techniqueNameHash[$technique]
-            $newRow.Count = 1
-            $newRow.Description = $techniqueDescriptionHash[$technique]
-            $newRow.RuleName = $result.displayName
-            $newRow.IsRuleEnabled = $result.enabled
-    
-            [void]$outputObject.Rows.Add( $newRow )
-          }
-        }
-        #Just show the number of active rules
-        else {
-          foreach ($result in ($results.properties | Where-Object { ($_.techniques -eq $technique) -and ($_.tactics -eq $tactic) -and ($_.enabled -eq $true) })) {
-            $newRow = $outputObject.NewRow()
-            $newRow.Tactic = $tactic
-            $newRow.Technique = $technique
-            $newRow.Name = $techniqueNameHash[$technique]
-            $newRow.Count = 1
-            $newRow.Description = $techniqueDescriptionHash[$technique]
-            $newRow.RuleName = $result.displayName
-            $newRow.IsRuleEnabled = $result.enabled
-    
-            [void]$outputObject.Rows.Add( $newRow )
-          }
-        }
-      }
-      #Just show the count
-      else {
-        #Do we want to include those rules that are disabled?
-        if ($IncludeDisabled) {
-          $count = ($results.properties | Where-Object { ($_.techniques -eq $technique) -and ($_.tactics -eq $tactic) }).count
-        }
-        #Just show the active rules
-        else {
-          $count = ($results.properties | Where-Object { ($_.techniques -eq $technique) -and ($_.tactics -eq $tactic) -and ($_.enabled -eq $true) }).count
-        }
-      
-        $newRow = $outputObject.NewRow()
-        $newRow.Tactic = $tactic
-        $newRow.Technique = $technique
-        $newRow.Name = $techniqueNameHash[$technique]
-        $newRow.Count = $count
-        $newRow.Description = $techniqueDescriptionHash[$technique]
-
-        [void]$outputObject.Rows.Add( $newRow )
-      }
-    }
-  }
-  #IF we are showing the rules, then we want to export all the fields
-  if ($ShowRules) {
-    $outputObject |  Export-Csv -QuoteFields "Description", "RuleName" -Path $FileName
-  }
-  #Otherwise, we want all the fields other than the RuleName and IsRuleEnabled
-  else {
-    $outputObject | Select-Object Tactic, Technique, Name, Count, Description |  Export-Csv -QuoteFields "Description", "RuleName" -Path $FileName
-  }
 }
 
 
-
 #Execute the code
-Export-AzSentineMITREToCSV $WorkspaceName $ResourceGroupName $FileName $IncludeDisabled $ShowRules $ShowIncidents
+Export-AzSentineMITREIncidentsToCSV $WorkspaceName $ResourceGroupName $FileName $IncludeDisabled $ShowRules $ShowIncidents
