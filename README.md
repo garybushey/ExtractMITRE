@@ -1,7 +1,8 @@
 # ExtractMITRE
 Extract MITRE ATT&amp;CK information
 
-This script will extract the information shown in Microsoft Sentinel's MITRE ATT&CK page and put it into a CSV file for manipulation.
+Export-AzSentinelMITREToCSV.ps1 will export a count of the rules that match tactic/techniques or a list of the rules
+Export-AzSentinelMITREIncidentsToCSV.ps1 will export a listing of the incidents that match the tactic/techniques.
 
 Make sure you are logged into Azure and are in the correct subscription before running:
 
